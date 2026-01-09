@@ -12,6 +12,23 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 4000;
 
+let cachedApiVersion = null;
+
+async function getLatestApiVersion(instance_url, access_token) {
+  if (cachedApiVersion) return cachedApiVersion;
+
+  const res = await axios.get(
+    `${instance_url}/services/data`,
+    {
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+      },
+    }
+  );
+
+  cachedApiVersion = res.data[0].version; 
+  return cachedApiVersion;
+}
 
 app.post("/oauth/token", async (req, res) => {
   const { code } = req.body;
@@ -154,6 +171,45 @@ app.get("/sf/userinfo", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch user info" });
   }
 });
+app.get("/sf/organization", async (req, res) => {
+  const { access_token, instance_url } = req.headers;
+
+  if (!access_token || !instance_url) {
+    return res.status(400).json({
+      error: "Missing access_token or instance_url",
+    });
+  }
+
+  try {
+    const apiVersion = await getLatestApiVersion(
+      instance_url,
+      access_token
+    );
+
+    const response = await axios.get(
+      `${instance_url}/services/data/v${apiVersion}/query`,
+      {
+        headers: {
+          Authorization: `Bearer ${access_token}`,
+        },
+        params: {
+          q: "SELECT Name, OrganizationType, IsSandbox, InstanceName FROM Organization",
+        },
+      }
+    );
+
+    res.json({
+      apiVersion,
+      ...response.data.records[0],
+    });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).json({
+      error: "Failed to fetch organization info",
+    });
+  }
+});
+
 
 app.get("/", (req, res) => {
   res.send("Backend is up and running!");
