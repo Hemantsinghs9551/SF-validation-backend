@@ -31,10 +31,10 @@ async function getLatestApiVersion(instance_url, access_token) {
 }
 
 app.post("/oauth/token", async (req, res) => {
-  const { code } = req.body;
+  const { code, loginUrl } = req.body;
 
-  if (!code) {
-    return res.status(400).json({ error: "Authorization code is required" });
+  if (!code || !loginUrl) {
+    return res.status(400).json({ error: "code and loginUrl required" });
   }
 
   try {
@@ -47,14 +47,14 @@ app.post("/oauth/token", async (req, res) => {
     });
 
     const response = await axios.post(
-      "https://login.salesforce.com/services/oauth2/token",
+      `${loginUrl}/services/oauth2/token`,
       params.toString(),
       {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
       }
     );
 
-    return res.json(response.data);
+    res.json(response.data);
   } catch (err) {
     return res.status(err.response?.status || 500).json({
       error: "Token exchange failed",
