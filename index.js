@@ -2,39 +2,101 @@ import express from "express";
 import axios from "axios";
 import cors from "cors";
 import dotenv from "dotenv";
-
+import crypto from "crypto";
+import { CORS_ORIGINS, ENV } from "./constant";
+ 
 dotenv.config();
 
 const app = express();
-
-app.use(cors());
+// app.use(cors());
 app.use(express.json());
+app.use(
+  cors({
+    origin: CORS_ORIGINS,
+    credentials: true,
+  })
+);
+
 
 const PORT = process.env.PORT || 4000;
 
-let cachedApiVersion = null;
+const pkceStore = new Map();
 
-async function getLatestApiVersion(instance_url, access_token) {
-  if (cachedApiVersion) return cachedApiVersion;
+function generatePKCE() {
+  const codeVerifier = crypto.randomBytes(32).toString("base64url");
 
-  const res = await axios.get(
-    `${instance_url}/services/data`,
-    {
-      headers: {
-        Authorization: `Bearer ${access_token}`,
-      },
-    }
-  );
+  const codeChallenge = crypto
+    .createHash("sha256")
+    .update(codeVerifier)
+    .digest("base64url");
 
-  cachedApiVersion = res.data[0].version; 
-  return cachedApiVersion;
+  return { codeVerifier, codeChallenge };
 }
 
-app.post("/oauth/token", async (req, res) => {
-  const { code, loginUrl } = req.body;
 
-  if (!code || !loginUrl) {
-    return res.status(400).json({ error: "code and loginUrl required" });
+app.get("/oauth/login", (req, res) => {
+  const { loginUrl } = req.query;
+
+  if (!loginUrl) {
+    return res.status(400).json({ error: "loginUrl is required" });
+  }
+
+  const { codeVerifier, codeChallenge } = generatePKCE();
+  const state = crypto.randomUUID();
+
+  pkceStore.set(state, codeVerifier);
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: process.env.CLIENT_ID,
+    redirect_uri: process.env.REDIRECT_URI,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+    state,
+    prompt: "login" 
+  });
+
+  res.redirect(
+    `${loginUrl}/services/oauth2/authorize?${params.toString()}`
+  );
+});
+
+app.get("/oauth/callback", (req, res) => {
+  const { code, state, error, error_description } = req.query;
+
+  if (error) {
+    return res.redirect(
+      `${ENV.FRONTEND_URL}/?error=${encodeURIComponent(
+        error_description || error
+      )}`
+    );
+  }
+
+  res.redirect(
+    `${ENV.FRONTEND_URL}/oauth-success?code=${encodeURIComponent(
+      code
+    )}&state=${encodeURIComponent(state)}`
+  );
+});
+
+
+
+
+app.post("/oauth/token", async (req, res) => {
+  const { code, state, loginUrl } = req.body;
+
+  if (!code || !state || !loginUrl) {
+    return res.status(400).json({
+      error: "code, state, and loginUrl are required",
+    });
+  }
+
+  const codeVerifier = pkceStore.get(state);
+
+  if (!codeVerifier) {
+    return res.status(400).json({
+      error: "Invalid or expired PKCE state",
+    });
   }
 
   try {
@@ -44,6 +106,7 @@ app.post("/oauth/token", async (req, res) => {
       client_secret: process.env.CLIENT_SECRET,
       redirect_uri: process.env.REDIRECT_URI,
       code,
+      code_verifier: codeVerifier,
     });
 
     const response = await axios.post(
@@ -54,9 +117,11 @@ app.post("/oauth/token", async (req, res) => {
       }
     );
 
+    pkceStore.delete(state);
+
     res.json(response.data);
   } catch (err) {
-    return res.status(err.response?.status || 500).json({
+    res.status(err.response?.status || 500).json({
       error: "Token exchange failed",
       details: err.response?.data || err.message,
     });
@@ -69,7 +134,7 @@ app.get("/validation-rules", async (req, res) => {
 
   if (!access_token || !instance_url) {
     return res.status(400).json({
-      error: "Missing access_token or instance_url in headers",
+      error: "Missing access_token or instance_url",
     });
   }
 
@@ -81,7 +146,7 @@ app.get("/validation-rules", async (req, res) => {
           Authorization: `Bearer ${access_token}`,
         },
         params: {
-          q: "SELECT Id, ValidationName, Active FROM ValidationRule WHERE EntityDefinition.QualifiedApiName = 'Account'",
+          q: "SELECT Id, ValidationName, Active FROM ValidationRule",
         },
       }
     );
@@ -93,7 +158,6 @@ app.get("/validation-rules", async (req, res) => {
     );
   }
 });
-
 
 
 async function getValidationRuleMetadata(instance_url, access_token, id) {
@@ -128,11 +192,9 @@ app.patch("/validation-rules/:id", async (req, res) => {
 
     metadata.active = active;
 
-    const response = await axios.patch(
+    await axios.patch(
       `${instance_url}/services/data/v59.0/tooling/sobjects/ValidationRule/${id}`,
-      {
-        Metadata: metadata,
-      },
+      { Metadata: metadata },
       {
         headers: {
           Authorization: `Bearer ${access_token}`,
@@ -141,21 +203,17 @@ app.patch("/validation-rules/:id", async (req, res) => {
       }
     );
 
-    res.json({ success: true, result: response.data });
+    res.json({ success: true });
   } catch (err) {
-    console.error("Salesforce Metadata update error:", err.response?.data);
-
     res.status(err.response?.status || 500).json(
-      err.response?.data || {
-        error: "Failed to toggle validation rule",
-      }
+      err.response?.data || { error: "Failed to toggle rule" }
     );
   }
 });
 app.get("/sf/userinfo", async (req, res) => {
-  try {
-    const { access_token, instance_url } = req.headers;
+  const { access_token, instance_url } = req.headers;
 
+  try {
     const sfRes = await axios.get(
       `${instance_url}/services/oauth2/userinfo`,
       {
@@ -166,8 +224,7 @@ app.get("/sf/userinfo", async (req, res) => {
     );
 
     res.json(sfRes.data);
-  } catch (err) {
-    console.error(err.response?.data || err.message);
+  } catch {
     res.status(500).json({ error: "Failed to fetch user info" });
   }
 });
@@ -181,13 +238,8 @@ app.get("/sf/organization", async (req, res) => {
   }
 
   try {
-    const apiVersion = await getLatestApiVersion(
-      instance_url,
-      access_token
-    );
-
-    const response = await axios.get(
-      `${instance_url}/services/data/v${apiVersion}/query`,
+    const sfRes = await axios.get(
+      `${instance_url}/services/data/v59.0/query`,
       {
         headers: {
           Authorization: `Bearer ${access_token}`,
@@ -198,10 +250,7 @@ app.get("/sf/organization", async (req, res) => {
       }
     );
 
-    res.json({
-      apiVersion,
-      ...response.data.records[0],
-    });
+    res.json(sfRes.data.records[0]);
   } catch (err) {
     console.error(err.response?.data || err.message);
     res.status(500).json({
@@ -209,6 +258,7 @@ app.get("/sf/organization", async (req, res) => {
     });
   }
 });
+
 
 
 app.get("/", (req, res) => {
