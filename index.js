@@ -3,7 +3,7 @@ import axios from "axios";
 import cors from "cors";
 import dotenv from "dotenv";
 import crypto from "crypto";
-import { CORS_ORIGINS, ENV } from "./constant";
+import { CORS_ORIGINS, ENV } from "./constant.js";
  
 dotenv.config();
 
